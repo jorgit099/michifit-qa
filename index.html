@@ -5,8 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>MichiFit QA</title>
 <!--
-  MichiFit v3 · 2026-11-03
-  Cambios respecto a v2:
+  MichiFit v3.1 · 2026-11-04
+  Cambios respecto a v3:
+  - "Siguiente" = el primer ejercicio pendiente de arriba hacia abajo (regresa a los que te saltaste).
+  - "La vez pasada" muestra cualquier variante del ejercicio si la de hoy no tiene historial (con etiqueta).
+  - Guardado doble: localStorage + IndexedDB; al abrir se usa la copia mas reciente. "Ultimo guardado" en Ajustes.
+  Cambios de v3 respecto a v2:
   - Corregido: el tiempo de descanso ya no aparece repetido en la lista de ejercicios.
   - Orden libre: "Siguiente" lleva al siguiente ejercicio PENDIENTE (nunca a uno terminado);
     aviso "Ir al pendiente" en ejercicios completos y confirmacion antes de una serie extra.
@@ -201,7 +205,7 @@ nav.bar button.on{background:var(--primary);color:var(--onprimary);font-weight:8
 (function(){
 'use strict';
 /* ====== Rutina Nov-Dic 2026 ====== */
-var ENV='qa', START='2026-11-02', SEMANAS=9, LS=ENV==='qa'?'michifit-qa':'michifit-v2', TRANS=180, ATAJO='Descanso MichiFit', VER='v3';
+var ENV='qa', START='2026-11-02', SEMANAS=9, LS=ENV==='qa'?'michifit-qa':'michifit-v2', TRANS=180, ATAJO='Descanso MichiFit', VER='v3.1';
 var DIAS=['dom','lun','mar','mie','jue','vie','sab'];
 var CORTO={lun:'Lun',mar:'Mar',mie:'Mié',jue:'Jue',vie:'Vie',sab:'Sáb'};
 var LETRA={lun:'L',mar:'M',mie:'M',jue:'J',vie:'V',sab:'S'};
@@ -290,11 +294,13 @@ function nSeries(it){return it&&it.series?it.series.length:0;}
 function completo(ex,it){return ex.k==='cardio'?nSeries(it)>=1:nSeries(it)>=ex.s;}
 function fechasDesc(){return Object.keys(S.ses).sort().reverse();}
 function historial(nombre,incluirHoy){var f0=hoy(),fs=fechasDesc();for(var i=0;i<fs.length;i++){var f=fs[i];if(!incluirHoy&&f===f0)continue;var s=S.ses[f];if(!s||!s.items)continue;for(var k in s.items){var it=s.items[k];var ser=(it.series||[]).filter(function(x){return x.n===nombre;});if(ser.length)return {fecha:f,series:ser,nota:it.nombre===nombre?it.nota:''};}}return null;}
+function historialSlot(exId,incluirHoy){var f0=hoy(),fs=fechasDesc();for(var i=0;i<fs.length;i++){var f=fs[i];if(!incluirHoy&&f===f0)continue;var s=S.ses[f],it=s&&s.items&&s.items[exId];if(it&&it.series&&it.series.length){var nm=it.series[it.series.length-1].n;return {fecha:f,series:it.series.filter(function(x){return x.n===nm;}),nombre:nm};}}return null;}
 function e1(x){return (+x.p||0)*(1+(+x.r||0)/30);}
 function textoSerie(ex,x){if(x.pc)return 'Peso corporal × '+(x.r||0)+(ex.k==='time'?' s':'');if(ex.k==='cardio')return (x.min||0)+' min';if(ex.k==='time')return (x.r||0)+' s';if(ex.k==='bw')return ((+x.p)?fmt(x.p)+' kg × ':'')+(x.r||0)+' reps';return fmt(x.p)+' kg × '+(x.r||0);}
 var PC_RE=/paralelas|dominadas|colgado|rodillas al pecho|plancha|dead bug/i;
 function pcDefault(ex,nom){return ex.k==='bw'||PC_RE.test(nom||'');}
-function siguientePendiente(desde,excluir){var ej=R[S.dia].ej,s=S.ses[hoy()],its=s&&s.dia===S.dia&&s.items?s.items:{},n=ej.length;for(var k=1;k<=n;k++){var i=(desde+k)%n;if(i===excluir)continue;if(!completo(ej[i],its[ej[i].id]))return i;}return null;}
+function pendientes(excluir){var ej=R[S.dia].ej,s=S.ses[hoy()],its=s&&s.dia===S.dia&&s.items?s.items:{},a=[];for(var i=0;i<ej.length;i++){if(i===excluir)continue;if(!completo(ej[i],its[ej[i].id]))a.push(i);}return a;}
+function siguientePendiente(desde,excluir){var a=pendientes(excluir);return a.length?a[0]:null;}
 function paso(ex){if(ex.k==='bw')return 2.5;return ex.inc&&ex.inc<2.5?ex.inc:(ex.inc||2.5);}
 function sugerir(ex,h,meta){
  var lo=ex.r[0],hi=ex.r[1];if(ex.k==='cardio')return null;
@@ -398,11 +404,15 @@ var IC={hoy:'<path d="M6.5 6.5v11M17.5 6.5v11M3 9.5v5M21 9.5v5M6.5 12h11"/>',his
 function ic(k,sz,sw){return '<svg width="'+(sz||22)+'" height="'+(sz||22)+'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="'+(sw||2.2)+'" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+IC[k]+'</svg>';}
 
 /* ====== Guardado en el celular ====== */
-function guardar(){try{localStorage.setItem(LS,JSON.stringify({ses:S.ses,swaps:S.swaps,pesos:S.pesos}));}catch(e){toast('No se pudo guardar en el celular. Haz un respaldo.','err');}}
+var IDB=null,idbOk=false,savedAt=0;
+function idbAbrir(cb){try{if(!window.indexedDB)return cb(null);var rq=indexedDB.open(LS,1);rq.onupgradeneeded=function(){rq.result.createObjectStore('kv');};rq.onsuccess=function(){IDB=rq.result;cb(IDB);};rq.onerror=function(){cb(null);};}catch(e){cb(null);}}
+function idbPut(obj){if(!IDB)return;try{var tx=IDB.transaction('kv','readwrite');tx.objectStore('kv').put(obj,'data');tx.oncomplete=function(){idbOk=true;};tx.onerror=function(){idbOk=false;};}catch(e){idbOk=false;}}
+function idbGet(cb){if(!IDB)return cb(null);try{var rq=IDB.transaction('kv','readonly').objectStore('kv').get('data');rq.onsuccess=function(){cb(rq.result||null);};rq.onerror=function(){cb(null);};}catch(e){cb(null);}}
+function guardar(){savedAt=Date.now();var obj={ses:S.ses,swaps:S.swaps,pesos:S.pesos,savedAt:savedAt};var ok=true;try{localStorage.setItem(LS,JSON.stringify(obj));}catch(e){ok=false;}idbPut(JSON.parse(JSON.stringify(obj)));if(!ok&&!IDB)toast('No se pudo guardar en el celular. Haz un respaldo.','err');}
 function guardarCfg(){try{localStorage.setItem(LS+'-cfg',JSON.stringify(S.cfg));}catch(e){}}
 function guardarRest(){try{if(S.rest)localStorage.setItem(LS+'-rest',JSON.stringify(S.rest));else localStorage.removeItem(LS+'-rest');}catch(e){}}
 function cargar(){
- try{var j=JSON.parse(localStorage.getItem(LS)||'null');if(j){S.ses=j.ses||{};S.swaps=j.swaps||{};S.pesos=j.pesos||{};}}catch(e){}
+ try{var j=JSON.parse(localStorage.getItem(LS)||'null');if(j){S.ses=j.ses||{};S.swaps=j.swaps||{};S.pesos=j.pesos||{};savedAt=j.savedAt||0;}}catch(e){}
  try{var c=JSON.parse(localStorage.getItem(LS+'-cfg')||'null');if(c)for(var k in c)S.cfg[k]=c[k];}catch(e){}
  try{var r=JSON.parse(localStorage.getItem(LS+'-rest')||'null');if(r&&Date.now()-r.fin<30*60000)S.rest=r;else localStorage.removeItem(LS+'-rest');}catch(e){}
  try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist();}catch(e){}
@@ -440,7 +450,7 @@ function iniciarDescanso(ex,s,it){
  if(!dur){s.setStart=now;return;}
  var last=it.series[n-1],es=done?null:entreSeries(ex,last),sig,meta='',despues='';
  if(!done){sig='Serie '+(n+1)+' de '+ex.s+(ex.k==='w'&&es?' · '+fmt(es.peso)+' kg':'');meta=ex.r[0]+'-'+ex.r[1]+(ex.k==='time'?' s':' reps');var pd=siguientePendiente(S.ex,S.ex);if(pd!=null)despues=nombreDe(S.dia,tpl.ej[pd]);if(es)S.draft[ex.id]={peso:es.peso,reps:last.r,rir:null,min:ex.r[0],pc:false};}
- else{var nx=tpl.ej[nxIdx];sig=nombreDe(S.dia,nx);meta=plan(nx);var p2=siguientePendiente(nxIdx,S.ex);if(p2!=null&&p2!==nxIdx)despues=nombreDe(S.dia,tpl.ej[p2]);}
+ else{var nx=tpl.ej[nxIdx];sig=nombreDe(S.dia,nx);meta=plan(nx);var p2=pendientes(S.ex).filter(function(i){return i!==nxIdx;})[0];if(p2!=null)despues=nombreDe(S.dia,tpl.ej[p2]);}
  S.rest={ini:now,fin:now+dur*1000,total:dur,fecha:s.fecha,exId:ex.id,idx:n-1,exIdx:S.ex,done:done,nxIdx:nxIdx,titulo:nombreDe(S.dia,ex)+' · serie '+n+' guardada',sig:sig,meta:meta,despues:despues,sug:es?es.txt:'',sonado:false,min:false};
  guardarRest();abrirAtajo(dur);
 }
@@ -583,7 +593,7 @@ function vHoy(){
  h+='<div class="sec"><h2>Ejercicios</h2><span class="eyebrow">La vez pasada</span></div><div class="list">';
  tpl.ej.forEach(function(ex,i){
   var nom=nombreDe(dk,ex),it=mio&&mio.items?mio.items[ex.id]:null,hh=historial(nom,false),sg=sugerir(ex,hh,rirMeta(dk)),ok=completo(ex,it),n=nSeries(it);
-  h+='<button type="button" class="exrow" data-act="abrir" data-v="'+i+'"><span class="n c'+(i%3)+(ok?' ok':'')+'">'+(ok?ic('chk',16,3):(i+1))+'</span><span class="mid"><span class="nm">'+esc(nom)+'</span><span class="pl">'+esc(plan(ex))+'</span></span><span class="rt"><span class="last num">'+(hh?esc(textoSerie(ex,hh.series[hh.series.length-1])):'—')+'</span>'+(n&&!ok?'<span class="badge prog">'+n+'/'+ex.s+'</span>':(!ok&&sg&&sg.tipo==='sube'?'<span class="badge">SUBE PESO</span>':''))+'</span></button>';
+  h+='<button type="button" class="exrow" data-act="abrir" data-v="'+i+'"><span class="n c'+(i%3)+(ok?' ok':'')+'">'+(ok?ic('chk',16,3):(i+1))+'</span><span class="mid"><span class="nm">'+esc(nom)+'</span><span class="pl">'+esc(plan(ex))+'</span></span><span class="rt">'+(function(){if(hh)return '<span class="last num">'+esc(textoSerie(ex,hh.series[hh.series.length-1]))+'</span>';var hv=historialSlot(ex.id,false);if(hv)return '<span class="last num">'+esc(textoSerie(ex,hv.series[hv.series.length-1]))+'</span><span style="font-size:11px;color:var(--muted);max-width:120px;text-align:right;line-height:1.2">'+esc(hv.nombre)+'</span>';return '<span class="last num">—</span>';})()+(n&&!ok?'<span class="badge prog">'+n+'/'+ex.s+'</span>':(!ok&&sg&&sg.tipo==='sube'?'<span class="badge">SUBE PESO</span>':''))+'</span></button>';
  });
  h+='</div>';
  if(!hecha){
@@ -614,7 +624,8 @@ function vEj(){
   h+='<div class="note muted">"Solo hoy" no cambia tu rutina. "Desde ahora" lo deja como tu ejercicio principal.</div><div class="row"><button type="button" class="btn teal" data-act="alt-hoy">Solo hoy</button><button type="button" class="btn" data-act="alt-siempre">Desde ahora</button><button type="button" class="btn link" data-act="alt-cancel">Cancelar</button></div></div>';
  }
  if(ex.t)h+='<div class="tempo"><div class="eyebrow" style="color:var(--tempoink)">Tempo · cómo mover el peso</div><div class="t">'+esc(ex.t)+'</div><div class="note">Rango completo, sin rebotes ni impulso.'+(ex.x?' <b>'+esc(ex.x)+'.</b>':'')+(ex.asist?' <b>Aquí el peso es asistencia: menos kg es más difícil.</b>':'')+'</div></div>';
- h+='<div class="card" style="display:flex;align-items:center;gap:10px">'+michi(ok?'fiesta':'banda',64)+'<div style="flex:1;min-width:0"><div class="muted" style="font-size:13px;font-weight:600">'+(hh?'La vez pasada · '+esc(fechaLarga(hh.fecha)):'Sin registros de este ejercicio')+'</div>'+(hh?'<div class="d num" style="font-size:20px;font-weight:700">'+esc(hh.series.map(function(x){return textoSerie(ex,x);}).join(' · '))+'</div>':'')+(hh&&hh.nota?'<div class="note muted">Nota: '+esc(hh.nota)+'</div>':'')+(sg?'<div class="sug '+(sg.tipo==='baja'?'baja':sg.tipo==='mismo'||sg.tipo==='nuevo'?'mismo':'')+'" style="margin-top:4px">'+(sg.tipo==='sube'?ic('up',14,3):'')+esc(sg.texto)+'</div>':'')+'</div></div>';
+ var hv=hh?null:historialSlot(ex.id,false);
+ h+='<div class="card" style="display:flex;align-items:center;gap:10px">'+michi(ok?'fiesta':'banda',64)+'<div style="flex:1;min-width:0"><div class="muted" style="font-size:13px;font-weight:600">'+(hh?'La vez pasada · '+esc(fechaLarga(hh.fecha)):hv?'La vez pasada con otra variante · '+esc(fechaLarga(hv.fecha)):'Sin registros de este ejercicio')+'</div>'+(hh?'<div class="d num" style="font-size:20px;font-weight:700">'+esc(hh.series.map(function(x){return textoSerie(ex,x);}).join(' · '))+'</div>':'')+(hv?'<div style="font-size:13px;font-weight:700">'+esc(hv.nombre)+'</div><div class="d num" style="font-size:20px;font-weight:700">'+esc(hv.series.map(function(x){return textoSerie(ex,x);}).join(' · '))+'</div>':'')+(hh&&hh.nota?'<div class="note muted">Nota: '+esc(hh.nota)+'</div>':'')+(sg?'<div class="sug '+(sg.tipo==='baja'?'baja':sg.tipo==='mismo'||sg.tipo==='nuevo'?'mismo':'')+'" style="margin-top:4px">'+(sg.tipo==='sube'?ic('up',14,3):'')+esc(sg.texto)+'</div>':'')+'</div></div>';
  var pend=siguientePendiente(S.ex,S.ex);
  if(ok)h+='<div class="ok-banner">'+ic('chk',20,3)+'<span style="flex:1">Ejercicio completo</span></div>'+(pend!=null?'<button type="button" class="btn teal" data-act="ir" data-v="'+pend+'" style="width:100%">Ir al pendiente: '+esc(nombreDe(dk,tpl.ej[pend]))+'</button>':'<button type="button" class="btn teal" data-act="volver" style="width:100%">Ya no hay pendientes: ir a terminar</button>');
  if(S.conf==='extra')h+='<div class="conf" role="alert"><div><b>Este ejercicio ya está completo.</b> ¿Agregar una serie extra?</div><div class="row"><button type="button" class="btn teal" data-act="extra-si">Sí, serie extra</button><button type="button" class="btn" data-act="conf-no">Cancelar</button></div></div>';
@@ -693,6 +704,7 @@ function vProg(){
 function vAj(){
  var h='<h1 class="d" style="font-size:32px;font-weight:800">Ajustes</h1>';
  var ult=S.cfg.lastBackup;
+ h+='<div class="card note"><div class="eyebrow" style="margin-bottom:4px">Guardado en el celular</div>Último guardado: <b>'+(savedAt?(function(){var d=Math.round((Date.now()-savedAt)/1000);return d<60?'hace '+d+' s':d<3600?'hace '+Math.round(d/60)+' min':new Date(savedAt).toLocaleString('es-MX',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});})():'sin datos aún')+'</b> · '+(idbOk?'en 2 lugares ✓':'en 1 lugar')+'</div>';
  h+='<div class="card" style="display:flex;flex-direction:column;gap:8px"><div class="eyebrow">Respaldo de tus datos</div><div class="note">Tus registros viven en este celular. Respalda cada semana y guarda el archivo en tu carpeta <b>MichiFit\\05_Respaldos_datos</b> (por Archivos, OneDrive o correo).<br>Último respaldo: <b>'+(ult?esc(fechaLarga(ult)):'nunca')+'</b></div><div class="row"><button type="button" class="btn teal" data-act="respaldar">Respaldar ahora</button><button type="button" class="btn" data-act="importar">Restaurar desde archivo</button></div>';
  if(S.imp)h+='<div class="conf" role="alert"><div>El archivo <b>'+esc(S.imp.nombre)+'</b> trae <b>'+S.imp.n+' entrenamientos</b>. Los días que ya tengas se reemplazan con los del archivo.</div><div class="row"><button type="button" class="btn teal" data-act="imp-si">Restaurar</button><button type="button" class="btn" data-act="imp-no">Cancelar</button></div></div>';
  h+='</div>';
@@ -752,6 +764,8 @@ function render(){
 }
 
 cargar();aplicarTema();initDia();render();
+idbAbrir(function(db){if(!db)return;idbGet(function(d){if(d&&(d.savedAt||0)>savedAt){S.ses=d.ses||{};S.swaps=d.swaps||{};S.pesos=d.pesos||{};savedAt=d.savedAt;try{localStorage.setItem(LS,JSON.stringify(d));}catch(e){}S.draft={};initDia();render();}else if(savedAt||Object.keys(S.ses).length){guardar();}else idbOk=true;});});
+window.addEventListener('pagehide',function(){if(savedAt)guardar();});
 if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('sw.js').catch(function(){});});}
 })();
 </script>
